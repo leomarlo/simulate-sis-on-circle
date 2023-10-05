@@ -11,6 +11,9 @@ import mido
 from mido import MidiFile, MidiTrack, Message
 import subprocess
 
+BASEPITCH = 60
+PITCH_INC = 1
+
 
 
 def midi_to_musicxml(midi_filename, xml_filename):
@@ -32,11 +35,13 @@ def giffify_fun(howmany, output_filename="visualization.gif", duration=0.1):
 
 class SISModel:
     def __init__(self, N, initial, lambda_, r, dt, K=200):
+        self.N = N
         self.g = generate(N, initial)
         self.lambda_ = lambda_
         self.r = r
         self.dt = dt
         self.K = K
+        self.stored_run = []
 
     def update(self):
         new_states = {}
@@ -64,13 +69,14 @@ class SISModel:
             raise ValueError(errormessage)
         
     
-    def run(self, total_time):
-        self.__check_number_of_iterations(total_time)
-        snapshots = []
+    def run(self, total_time, store_run=True):
+        # self.__check_number_of_iterations(total_time)
+        if store_run:
+            self.stored_run = []
         for _ in range(int(total_time / self.dt)):
             self.update()
-            snapshots.append([data['state'] for _, data in self.g.nodes(data=True)])
-        return snapshots
+            if store_run:
+                self.stored_run.append([data['state'] for _, data in self.g.nodes(data=True)])
 
     
     def run_and_visualize(self, total_time, update_interval, inverted=False, giffify=0, show=True):
@@ -127,37 +133,72 @@ class SISModel:
 
 
 
-    def run_midi_out(self, total_time, filename, ticks_per_beat=480, ramp=0.5, rampType='linear'):
-        # Ensure rampType is valid
-        if rampType != 'linear':
-            raise ValueError("Only 'linear' rampType is currently supported.")
-
+    def run_with_midi_out(self, total_time, midi_ticks_per_dt, filename, store_run=True, debug=True):
         # Create a new MIDI file
         mid = MidiFile()
+        track = MidiTrack() 
+        mid.tracks.append(track) 
+        CHANNEL = 0
 
-        # Helper function to calculate velocity based on state and ramp
-        def calculate_velocity(state, prev_velocity):
-            target_velocity = 127 if state == 1 else 0
-            if rampType == 'linear':
-                return int(prev_velocity + ramp * (target_velocity - prev_velocity))
-            # Other ramp types can be added here in the future
+        if store_run:
+            self.stored_run = []
 
         # Create a track for each node
-        tracks = [MidiTrack() for _ in self.g.nodes()]
-        for track in tracks:
-            mid.tracks.append(track)
+        pitches = {node:BASEPITCH + node * PITCH_INC for node, _ in enumerate(self.g.nodes()) }
 
-        # Store velocities and previous velocities for each node
-        prev_velocities = [0] * len(self.g.nodes())
+        nrNodes = len(self.g.nodes())  ## same as self.N in this implementation 
 
+        # initialize previous midi states 
+        states = {
+            'last_message': 0,
+            'nodes': {
+                node: {'prev': 0, 'curr': 0} for node in range(nrNodes)}
+        }
+        
+        t = 0
         # Run the simulation and generate MIDI messages
-        for _ in range(int(total_time / self.dt)):
-            for node, track in enumerate(tracks):
-                velocity = calculate_velocity(self.g.nodes[node]['state'], prev_velocities[node])
-                track.append(Message('note_on', note=60, velocity=velocity, time=int(self.dt * ticks_per_beat), channel=node % 16))
-                prev_velocities[node] = velocity
-            self.update()
+        for i in range(int(total_time / self.dt)):
+            if debug:
+                if (i%10)==0:
+                    print('current time is', i)
+                    # print('the current state is', states)
+            for node in range(nrNodes):
+                states['nodes'][node]['curr'] = self.g.nodes[node]['state']
 
+                velocity = 127 if self.g.nodes[node]['state'] == 1 else 0
+                ## if previous notes are different do the action
+                if (states['nodes'][node]['prev'] != states['nodes'][node]['curr']):
+                    if debug:
+                        if (i%10)==0:
+                            print('the state changed for node', node)
+                    # something changed for this node
+                    if states['nodes'][node]['curr'] == 1:
+                        # the node has turned on
+                        track.append(Message(
+                            'note_on', 
+                            note=pitches[node], 
+                            velocity=127, 
+                            time=int(states['last_message']),
+                            channel=CHANNEL))
+                        states['last_message'] = 0
+                    else:
+                        track.append(Message(
+                            'note_off', 
+                            note=pitches[node], 
+                            velocity=0, 
+                            time=int(states['last_message']),
+                            channel=CHANNEL))
+                        states['last_message'] = 0                    
+                states['nodes'][node]['prev'] = states['nodes'][node]['curr']
+            if store_run:
+                self.stored_run.append([data['state'] for _, data in self.g.nodes(data=True)])
+            self.update()
+            if debug:
+                if (i%10)==0:
+                    print([self.g.nodes[node]['state'] for node in range(nrNodes)])
+            
+            # update the states
+            states['last_message'] += midi_ticks_per_dt
         # Save the MIDI file
         mid.save(filename)
 
